@@ -1,6 +1,6 @@
-mod cheater;
+mod bot;
 
-use crate::{cli::SharedParams, mono::cheater::Cheater};
+use crate::{cli::SharedParams, mono::bot::CheaterBot};
 
 use std::{io::Write, path::PathBuf, sync::Arc};
 
@@ -16,8 +16,11 @@ use ansi_term::Colour;
 use chrono::Utc;
 use clap::{Parser, ValueHint};
 use fantoccini::{ClientBuilder, Locator};
-use log::Level;
-use tokio::sync::{Mutex, RwLock};
+use log::{logger, Level};
+use tokio::{
+    sync::{Mutex, RwLock},
+    time::{sleep, Duration},
+};
 
 #[derive(Debug, Parser)]
 pub struct Opts {
@@ -39,30 +42,19 @@ pub fn run(shared: SharedParams, opts: Opts) -> anyhow::Result<()> {
     // let pg_pool = system.block_on(connect_and_migrate(&shared.database_url, 5))?;
 
     system.block_on(async {
-        let cheater = Cheater::new(shared.config_path, shared.webdriver_url.as_deref()).await?;
-        log::error!("cheater {:?}", cheater);
-        let account = &cheater.config.user.account;
-        let password = &cheater.config.user.password;
+        let bot = CheaterBot::new(shared.config_path, shared.webdriver_url.as_deref()).await?;
+        log::error!("cheater {:?}", bot);
 
-        // go to the Ogame home page
-        cheater
-            .client
-            .goto("https://lobby.ogame.gameforge.com/zh_TW/")
-            .await?;
+        bot.login().await?;
 
-        let account_input = cheater
-            .client
-            .wait()
-            .for_element(Locator::XPath(r#"//input[@type='email']"#))
-            .await?;
-        account_input.send_keys(account).await?;
-
-        let password_input = cheater
-            .client
-            .wait()
-            .for_element(Locator::XPath(r#"//input[@type='password']"#))
-            .await?;
-        password_input.send_keys(password).await?;
+        let resource = bot.get_resource().await?;
+        log::info!("resources {:?}", resource);
+        let infrastructure = bot.get_infrastructure_level().await?;
+        log::info!("infrastructure {:?}", infrastructure);
+        let facility = bot.get_facility_level().await?;
+        log::info!("facility {:?}", facility);
+        let technology = bot.get_technology_level().await?;
+        log::info!("technology {:?}", technology);
 
         Ok(())
         // build_http_service(&opts.host, pg_pool, generation_engine, grpc_client)
