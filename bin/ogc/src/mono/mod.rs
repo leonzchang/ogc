@@ -1,8 +1,13 @@
 mod bot;
 
-use crate::{cli::SharedParams, mono::bot::CheaterBot};
+use crate::{
+    cli::SharedParams,
+    mono::bot::{CheatBot, Config},
+};
 
 use std::{io::Write, path::PathBuf, sync::Arc};
+
+use ogc_core::sqlx_postgres::connect_and_migrate;
 
 use actix_cors::Cors;
 use actix_web::{
@@ -39,22 +44,24 @@ pub fn run(shared: SharedParams, opts: Opts) -> anyhow::Result<()> {
     init_logger("warn,oracle-core=info,oracle=info", true);
 
     let system = System::new();
-    // let pg_pool = system.block_on(connect_and_migrate(&shared.database_url, 5))?;
+    let pg_pool = system.block_on(connect_and_migrate(&shared.database_url, 5))?;
 
     system.block_on(async {
-        let bot = CheaterBot::new(shared.config_path, shared.webdriver_url.as_deref()).await?;
-        log::error!("cheater {:?}", bot);
+        let config_path = shared
+            .config_path
+            .unwrap_or("./deployment//dev.toml".into());
+        let Config { user } = Config::load(&config_path)?;
 
-        bot.login().await?;
+        // start cheat bot for empire data concurrently
+        let cheat_pg_pool = pg_pool.clone();
 
-        let resource = bot.get_resource().await?;
-        log::info!("resources {:?}", resource);
-        let infrastructure = bot.get_infrastructure_level().await?;
-        log::info!("infrastructure {:?}", infrastructure);
-        let facility = bot.get_facility_level().await?;
-        log::info!("facility {:?}", facility);
-        let technology = bot.get_technology_level().await?;
-        log::info!("technology {:?}", technology);
+        let bot = CheatBot::new(shared.webdriver_url.as_deref()).await?;
+        log::info!("Cheatbot {:?}", bot);
+
+        bot.login(&user.account, &user.password).await?;
+
+        let overview = bot.overview().await?;
+        log::info!("overview {:#?}", overview);
 
         Ok(())
         // build_http_service(&opts.host, pg_pool, generation_engine, grpc_client)

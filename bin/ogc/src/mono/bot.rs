@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use fantoccini::{Client, ClientBuilder, Locator};
+use fantoccini::{elements::Element, Client, ClientBuilder, Locator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::{
     sync::{Mutex, RwLock},
@@ -28,9 +28,8 @@ impl Config {
 }
 
 #[derive(Clone, Debug)]
-pub struct CheaterBot {
+pub struct CheatBot {
     pub client: Client,
-    pub config: Config,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -50,6 +49,8 @@ pub struct Infrastructure {
     pub deuterium_synthesizer: u8,
     pub energy_plant: u8,
     pub fusion_reactor: u8,
+    pub solar_satellite: u8,
+    pub crawler: u8,
     pub metal_storage: u8,
     pub crystal_storage: u8,
     pub deuterium_tank: u8,
@@ -89,23 +90,70 @@ pub struct Technology {
     pub shielding_technology: u8,
 }
 
-impl CheaterBot {
-    /// create a CheaterBot instance
-    pub async fn new(
-        config_path: Option<PathBuf>,
-        web_driver_url: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        let config_path = config_path.unwrap_or("./deployment//dev.toml".into());
-        let config = Config::load(&config_path)?;
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Defence {
+    pub rocket_launcher: u8,
+    pub light_laser: u8,
+    pub heavy_laser: u8,
+    pub ion_cannon: u8,
+    pub gauss_cannon: u8,
+    pub plasma_turret: u8,
+    pub small_shield_dome: u8,
+    pub large_shield_dome: u8,
+    pub anti_ballistic_missile: u8,
+    pub interplanetary_missile: u8,
+}
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Fleet {
+    pub light_fighter: u8,
+    pub heavy_fighter: u8,
+    pub cruiser: u8,
+    pub battleship: u8,
+    pub battlecruiser: u8,
+    pub bomber: u8,
+    pub destroyer: u8,
+    pub deathstar: u8,
+    pub reaper: u8,
+    pub pathfinder: u8,
+    pub small_cargo_ship: u8,
+    pub large_cargo_ship: u8,
+    pub colony_ship: u8,
+    pub recycler: u8,
+    pub espionage_probe: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EmpireOverview {
+    overview: Vec<PlanetOverview>,
+    technology: Technology,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanetOverview {
+    location: String,
+    resource: Resource,
+    infrastructure: Infrastructure,
+    facility: Facility,
+    defence: Defence,
+    fleet: Fleet,
+}
+
+impl CheatBot {
+    /// create a CheaterBot instance
+    pub async fn new(web_driver_url: Option<&str>) -> anyhow::Result<Self> {
         let web_driver_url = web_driver_url.unwrap_or("http://localhost:9515");
         let client = ClientBuilder::native().connect(web_driver_url).await?;
 
-        Ok(Self { client, config })
+        Ok(Self { client })
     }
 
     /// login the game
-    pub async fn login(&self) -> anyhow::Result<()> {
+    pub async fn login(&self, account: &str, password: &str) -> anyhow::Result<()> {
         // go to the Ogame home page
         self.client
             .goto("https://lobby.ogame.gameforge.com/zh_TW/")
@@ -125,14 +173,14 @@ impl CheaterBot {
             .wait()
             .for_element(Locator::XPath(r#"//input[@type='email']"#))
             .await?;
-        account_input.send_keys(&self.config.user.account).await?;
+        account_input.send_keys(account).await?;
 
         let password_input = self
             .client
             .wait()
             .for_element(Locator::XPath(r#"//input[@type='password']"#))
             .await?;
-        password_input.send_keys(&self.config.user.password).await?;
+        password_input.send_keys(password).await?;
 
         // click login
         let login = self
@@ -159,6 +207,49 @@ impl CheaterBot {
         self.client.switch_to_window(windows[1].clone()).await?;
 
         Ok(())
+    }
+
+    pub async fn overview(&self) -> anyhow::Result<EmpireOverview> {
+        let planets = self.get_all_planets().await?;
+        let mut overview = Vec::new();
+
+        for planet in planets {
+            let location = planet.text().await?.split('\n').collect::<Vec<&str>>()[1].to_owned();
+            // go to current location planet page
+            planet.click().await?;
+
+            let resource = self.get_resource().await?;
+            let infrastructure = self.get_infrastructure_level().await?;
+            let facility = self.get_facility_level().await?;
+            let defence = self.get_defense_unit_amount().await?;
+            let fleet = self.get_fleet_unit_amount().await?;
+
+            overview.push(PlanetOverview {
+                location,
+                resource,
+                infrastructure,
+                facility,
+                defence,
+                fleet,
+            })
+        }
+
+        let technology = self.get_technology_level().await?;
+
+        Ok(EmpireOverview {
+            overview,
+            technology,
+        })
+    }
+
+    /// get all planets
+    pub async fn get_all_planets(&self) -> anyhow::Result<Vec<Element>> {
+        let planets = self
+            .client
+            .find_all(Locator::XPath(r#"//div[@id='planetList']/div"#))
+            .await?;
+
+        Ok(planets)
     }
 
     /// get resources from a planet
@@ -267,6 +358,28 @@ impl CheaterBot {
             .await?
             .parse::<u8>()?;
 
+        let solar_satellite = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[6]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let crawler = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[7]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
         let metal_storage = self
             .client
             .wait()
@@ -306,6 +419,8 @@ impl CheaterBot {
             deuterium_synthesizer,
             energy_plant,
             fusion_reactor,
+            solar_satellite,
+            crawler,
             metal_storage,
             crystal_storage,
             deuterium_tank,
@@ -430,6 +545,7 @@ impl CheaterBot {
             .await?;
         technology_tab.click().await?;
 
+        // basic technologies
         let energy_technology = self
             .client
             .wait()
@@ -485,6 +601,7 @@ impl CheaterBot {
             .await?
             .parse::<u8>()?;
 
+        // drive technologies
         let combustion_drive = self
             .client
             .wait()
@@ -518,6 +635,7 @@ impl CheaterBot {
             .await?
             .parse::<u8>()?;
 
+        // advanced technologies
         let espionage_technology = self
             .client
             .wait()
@@ -573,6 +691,7 @@ impl CheaterBot {
             .await?
             .parse::<u8>()?;
 
+        // combat technologies
         let armour_technology = self
             .client
             .wait()
@@ -623,6 +742,356 @@ impl CheaterBot {
             armour_technology,
             weapons_technology,
             shielding_technology,
+        })
+    }
+
+    /// get defence unit amount
+    pub async fn get_defense_unit_amount(&self) -> anyhow::Result<Defence> {
+        let defense_tab = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(r#"//ul[@id='menuTable']/li[8]"#))
+            .await?;
+        defense_tab.click().await?;
+
+        let rocket_launcher = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[1]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let light_laser = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[2]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let heavy_laser = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[3]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let ion_cannon = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[4]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let gauss_cannon = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[5]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let plasma_turret = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[6]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let small_shield_dome = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[7]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let large_shield_dome = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[8]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let anti_ballistic_missile = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[9]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let interplanetary_missile = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='technologies']/ul/li[10]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        Ok(Defence {
+            rocket_launcher,
+            light_laser,
+            heavy_laser,
+            ion_cannon,
+            gauss_cannon,
+            plasma_turret,
+            small_shield_dome,
+            large_shield_dome,
+            anti_ballistic_missile,
+            interplanetary_missile,
+        })
+    }
+
+    /// get fleet unit amount
+    pub async fn get_fleet_unit_amount(&self) -> anyhow::Result<Fleet> {
+        let fleet_tab = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(r#"//ul[@id='menuTable']/li[9]"#))
+            .await?;
+        fleet_tab.click().await?;
+
+        // battleships
+        let light_fighter = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[1]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let heavy_fighter = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[2]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let cruiser = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[3]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let battleship = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[4]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let battlecruiser = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul/li[5]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let bomber = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[6]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let destroyer = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[7]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let deathstar = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[8]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let reaper = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[9]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let pathfinder = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='battleships']/ul[1]/li[10]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        // civilships
+        let small_cargo_ship = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='civilships']/ul[1]/li[1]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let large_cargo_ship = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='civilships']/ul[1]/li[2]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let colony_ship = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='civilships']/ul[1]/li[3]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let recycler = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='civilships']/ul[1]/li[4]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        let espionage_probe = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='civilships']/ul[1]/li[5]//span[@class='amount']"#,
+            ))
+            .await?
+            .text()
+            .await?
+            .parse::<u8>()?;
+
+        // let solar_satellite = self
+        //     .client
+        //     .wait()
+        //     .for_element(Locator::XPath(
+        //         r#"//div[@id='civilships']/ul[1]/li[6]//span[@class='amount']"#,
+        //     ))
+        //     .await?
+        //     .text()
+        //     .await?
+        //     .parse::<u8>()?;
+
+        // let crawler = self
+        //     .client
+        //     .wait()
+        //     .for_element(Locator::XPath(
+        //         r#"//div[@id='civilships']/ul[1]/li[7]//span[@class='amount']"#,
+        //     ))
+        //     .await?
+        //     .text()
+        //     .await?
+        //     .parse::<u8>()?;
+
+        Ok(Fleet {
+            light_fighter,
+            heavy_fighter,
+            cruiser,
+            battleship,
+            battlecruiser,
+            bomber,
+            destroyer,
+            deathstar,
+            reaper,
+            pathfinder,
+            small_cargo_ship,
+            large_cargo_ship,
+            colony_ship,
+            recycler,
+            espionage_probe,
         })
     }
 }
