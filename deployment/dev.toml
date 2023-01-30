@@ -1,3 +1,16 @@
 [user]
 account = "OGame account"
 password = "OGgame password"
+
+[planetsInfo]
+[[planetsInfo.planets]]
+planetId = "33630196"
+lunarId = "33631729"
+
+[[planetsInfo.planets]]
+planetId = "33630280"
+lunarId = "33631621"
+
+[[planetsInfo.planets]]
+planetId = "33630744"
+

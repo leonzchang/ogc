@@ -50,12 +50,12 @@ pub fn run(shared: SharedParams, opts: Opts) -> anyhow::Result<()> {
         let config_path = shared
             .config_path
             .unwrap_or("./deployment//dev.toml".into());
-        let Config { user } = Config::load(&config_path)?;
+        let Config { user, planets_info } = Config::load(&config_path)?;
 
-        // start cheat bot for empire data concurrently
-        let cheat_pg_pool = pg_pool.clone();
+        // // start cheat bot for empire data concurrently
+        // let _cheat_pg_pool = pg_pool.clone();
 
-        let bot = CheatBot::new(shared.webdriver_url.as_deref()).await?;
+        let bot = CheatBot::new(shared.webdriver_url.as_deref(), planets_info).await?;
         log::info!("Cheatbot {:?}", bot);
 
         bot.login(&user.account, &user.password).await?;
