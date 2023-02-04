@@ -2,7 +2,7 @@ mod bot;
 
 use crate::{
     cli::SharedParams,
-    mono::bot::{CheatBot, Config},
+    mono::bot::{CheatBot, Config, MissionType},
 };
 
 use std::{io::Write, path::PathBuf, sync::Arc};
@@ -56,12 +56,9 @@ pub fn run(shared: SharedParams, opts: Opts) -> anyhow::Result<()> {
         // let _cheat_pg_pool = pg_pool.clone();
 
         let bot = CheatBot::new(shared.webdriver_url.as_deref(), planets_info).await?;
-        log::info!("Cheatbot {:?}", bot);
 
-        bot.login(&user.account, &user.password).await?;
-
-        let overview = bot.overview().await?;
-        log::info!("overview {:#?}", overview);
+        bot.start(&user.account, &user.password).await?;
+        log::info!("done.");
 
         Ok(())
         // build_http_service(&opts.host, pg_pool, generation_engine, grpc_client)

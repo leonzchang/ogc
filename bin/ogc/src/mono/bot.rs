@@ -1,6 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{convert::TryFrom, fs, path::PathBuf};
 
+use anyhow::anyhow;
+use chrono::{DateTime, Local, TimeZone, Utc};
 use fantoccini::{elements::Element, Client, ClientBuilder, Locator};
+use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::{
     sync::{Mutex, RwLock},
@@ -151,32 +154,77 @@ pub struct Fleet {
     pub espionage_probe: u32,
 }
 
+impl Fleet {
+    pub fn is_zero(&self) -> bool {
+        let sum = self.light_fighter
+            + self.heavy_fighter
+            + self.cruiser
+            + self.battleship
+            + self.battlecruiser
+            + self.bomber
+            + self.destroyer
+            + self.deathstar
+            + self.reaper
+            + self.pathfinder
+            + self.small_cargo_ship
+            + self.large_cargo_ship
+            + self.colony_ship
+            + self.recycler
+            + self.espionage_probe;
+
+        sum == 0
+    }
+
+    pub fn is_not_zero(&self) -> bool {
+        let sum = self.light_fighter
+            + self.heavy_fighter
+            + self.cruiser
+            + self.battleship
+            + self.battlecruiser
+            + self.bomber
+            + self.destroyer
+            + self.deathstar
+            + self.reaper
+            + self.pathfinder
+            + self.small_cargo_ship
+            + self.large_cargo_ship
+            + self.colony_ship
+            + self.recycler
+            + self.espionage_probe;
+
+        sum != 0
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct EmpireOverview {
-    overview: Vec<PlanetOverview>,
+    pub overview: Vec<PlanetOverview>,
     technology: Technology,
+    pub maybe_fleet_events: Option<Vec<FleetEvent>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanetOverview {
-    location: String,
+    pub id: String,
+    pub location: String,
     resource: Resource,
     infrastructure: Infrastructure,
     facility: PlanetFacility,
     defence: Defence,
-    fleet: Fleet,
+    pub fleet: Fleet,
     lunar: Option<Lunar>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Lunar {
+    id: String,
     location: String,
     resource: Resource,
     facility: LunarFacility,
-    fleet: Fleet,
+    pub fleet: Fleet,
 }
 
 impl CheatBot {
@@ -192,6 +240,75 @@ impl CheatBot {
             client,
             planets_info,
         })
+    }
+
+    pub async fn start(&self, account: &str, password: &str) -> anyhow::Result<()> {
+        self.login(account, password).await?;
+
+        loop {
+            let expiration = Self::calculate_expiration()?;
+            log::info!(
+                "refreshing game state... {}",
+                Local::now().format("%Y/%m/%d %H:%M:%S")
+            );
+            let empire_overview = self.empire_overview().await?;
+            log::info!("empire_overview {:#?}", empire_overview);
+            // check if is being attack, and do fs
+            if let Some(fleet_events) = empire_overview.maybe_fleet_events {
+                for event in fleet_events.iter() {
+                    if event.mission_type == MissionType::EnemyAttacking {
+                        log::warn!(
+                            "{} is being attacked by {}",
+                            event.dest_coords,
+                            event.coords_origin
+                        );
+
+                        let planet = empire_overview
+                            .overview
+                            .iter()
+                            .find(|planet| planet.location == event.dest_coords)
+                            .ok_or_else(|| anyhow::anyhow!("no planet or lunar match"))?;
+
+                        // check if fleet still on planet, active fleet saveing
+                        if planet.fleet.is_not_zero() {
+                            self.fleet_saving(&planet.id).await?;
+                        }
+                    }
+                }
+            }
+            log::info!(
+                "next refresh time: {}",
+                expiration.with_timezone(&Local).format("%Y/%m/%d %H:%M:%S")
+            );
+
+            // delay until expiration for refreshing game state
+            sleep(Duration::from_millis(
+                (expiration.timestamp_millis() - Utc::now().timestamp_millis()) as u64,
+            ))
+            .await;
+        }
+    }
+
+    fn calculate_expiration() -> anyhow::Result<DateTime<Utc>> {
+        // 15 minutes
+        let refresh_rate = (REFRESH_RATE * MINUTE) as f32;
+
+        let mut rng = rand::thread_rng();
+        let random_number = rng.gen_range(0.0..1.0);
+
+        let expiration_period = random_number * (refresh_rate / 2.0f32).floor();
+
+        // random refresh page 8.25 ~ 21.75 mins per time
+        let time_until_expiration = if random_number < 0.5 {
+            (refresh_rate - expiration_period) as i64
+        } else {
+            (refresh_rate + expiration_period) as i64
+        };
+
+        let expired_time = Utc::now().timestamp_millis() + time_until_expiration;
+        let Some(expired_time) = Utc.timestamp_millis_opt(expired_time).single() else {return Err(anyhow!("calculate expiration time error"))};
+
+        Ok(expired_time)
     }
 
     /// login the game
@@ -281,7 +398,7 @@ impl CheatBot {
     }
 
     /// parse all inforamtion from empire
-    pub async fn overview(&self) -> anyhow::Result<EmpireOverview> {
+    pub async fn empire_overview(&self) -> anyhow::Result<EmpireOverview> {
         let mut overview = Vec::new();
 
         for planet in self.planets_info.planets.iter() {
@@ -290,10 +407,12 @@ impl CheatBot {
         }
 
         let technology = self.get_technology_level().await?;
+        let maybe_fleet_events = self.get_fleet_events().await?;
 
         Ok(EmpireOverview {
             overview,
             technology,
+            maybe_fleet_events,
         })
     }
 
@@ -324,6 +443,7 @@ impl CheatBot {
         let lunar = self.parse_lunar(&planet.lunar_id).await?;
 
         Ok(PlanetOverview {
+            id: planet.planet_id.clone(),
             location,
             resource,
             infrastructure,
@@ -337,7 +457,7 @@ impl CheatBot {
     pub async fn parse_lunar(&self, lunar: &Option<String>) -> anyhow::Result<Option<Lunar>> {
         match lunar {
             Some(id) => {
-                // go to the current planet overview
+                // go to the current lunar overview
                 let url = format!("https://s144-tw.ogame.gameforge.com/game/index.php?page=ingame&component=overview&cp={}", id);
                 self.client.goto(&url).await?;
 
@@ -357,6 +477,7 @@ impl CheatBot {
                 let fleet = self.get_fleet_unit_amount().await?;
 
                 Ok(Some(Lunar {
+                    id: id.to_owned(),
                     location,
                     resource,
                     facility,
@@ -1085,195 +1206,113 @@ impl CheatBot {
             .await?;
         fleet_tab.click().await?;
 
-        //HACK might no fleet should handle this
-        if let Ok(_) = self
+        // handle no fleet
+        if self
             .client
-            .wait()
-            .for_element(Locator::XPath(r#"//div[@id='warning']"#))
-            .await
+            .find_all(Locator::XPath(r#"//div[@id='fleet1']/div/div"#))
+            .await?
+            .len()
+            == 6
         {
-            log::info!("no fleet at this planet!");
-            let fleet_default = Fleet::default();
-            return Ok(fleet_default);
+            return Ok(Fleet::default());
         };
 
-        // battleships
-        let light_fighter = self
+        let battleships = self
             .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[1]//span[@class='amount']"#,
-            ))
-            .await?
+            .find_all(Locator::XPath(r#"//div[@id='battleships']/ul/li"#))
+            .await?;
+
+        let light_fighter = battleships[0]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let heavy_fighter = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[2]//span[@class='amount']"#,
-            ))
-            .await?
+        let heavy_fighter = battleships[1]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let cruiser = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul[1]/li[3]//span[@class='amount']"#,
-            ))
-            .await?
+        let cruiser = battleships[2]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let battleship = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[4]//span[@class='amount']"#,
-            ))
-            .await?
+        let battleship = battleships[3]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let battlecruiser = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[5]//span[@class='amount']"#,
-            ))
-            .await?
+        let battlecruiser = battleships[4]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let bomber = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[6]//span[@class='amount']"#,
-            ))
-            .await?
+        let bomber = battleships[5]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let destroyer = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[7]//span[@class='amount']"#,
-            ))
-            .await?
+        let destroyer = battleships[6]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let deathstar = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[8]//span[@class='amount']"#,
-            ))
-            .await?
+        let deathstar = battleships[7]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let reaper = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[9]//span[@class='amount']"#,
-            ))
-            .await?
+        let reaper = battleships[8]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let pathfinder = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='battleships']/ul/li[10]//span[@class='amount']"#,
-            ))
-            .await?
+        let pathfinder = battleships[9]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        // civilships
-        let small_cargo_ship = self
+        // // civilships
+        let civilships = self
             .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='civilships']/ul/li[1]//span[@class='amount']"#,
-            ))
-            .await?
+            .find_all(Locator::XPath(r#"//div[@id='civilships']/ul/li"#))
+            .await?;
+
+        let small_cargo_ship = civilships[0]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let large_cargo_ship = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='civilships']/ul/li[2]//span[@class='amount']"#,
-            ))
-            .await?
+        let large_cargo_ship = civilships[1]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let colony_ship = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='civilships']/ul/li[3]//span[@class='amount']"#,
-            ))
-            .await?
+        let colony_ship = civilships[2]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let recycler = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='civilships']/ul/li[4]//span[@class='amount']"#,
-            ))
-            .await?
+        let recycler = civilships[3]
             .text()
             .await?
             .replace(",", "")
             .parse::<u32>()?;
 
-        let espionage_probe = self
-            .client
-            .wait()
-            .for_element(Locator::XPath(
-                r#"//div[@id='civilships']/ul/li[5]//span[@class='amount']"#,
-            ))
-            .await?
+        let espionage_probe = civilships[4]
             .text()
             .await?
             .replace(",", "")
@@ -1297,4 +1336,264 @@ impl CheatBot {
             espionage_probe,
         })
     }
+
+    pub async fn get_fleet_events(&self) -> anyhow::Result<Option<Vec<FleetEvent>>> {
+        // wait for page loading
+        sleep(Duration::from_secs(1)).await;
+        // trigger drop for fetching data
+        let event_drop_down = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(r#"//a[@id='js_eventDetailsClosed']"#))
+            .await?;
+
+        if let Err(e) = event_drop_down.click().await {
+            log::info!("{}, might not have any events", e);
+            return Ok(None);
+        }
+
+        let event_content = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(r#"//table[@id='eventContent']/tbody"#))
+            .await?;
+
+        let events = event_content.find_all(Locator::XPath(r#"tr"#)).await?;
+
+        let mut fleet_events = Vec::new();
+
+        for event in events {
+            let Some(mission) = event
+                .find(Locator::XPath(r#"td[@class='missionFleet']/img"#))
+                .await?
+                .attr("title")
+                .await? else { return Err(anyhow::anyhow!("parse mission type error"))};
+
+            let arrival_time = event
+                .find(Locator::XPath(r#"td[@class='arrivalTime']"#))
+                .await?
+                .text()
+                .await?;
+
+            let coords_origin = event
+                .find(Locator::XPath(r#"td[@class='coordsOrigin']"#))
+                .await?
+                .text()
+                .await?;
+
+            let dest_coords = event
+                .find(Locator::XPath(r#"td[@class='destCoords']"#))
+                .await?
+                .text()
+                .await?;
+
+            fleet_events.push(FleetEvent {
+                mission_type: MissionType::try_from(mission)?,
+                arrival_time,
+                coords_origin,
+                dest_coords,
+            });
+        }
+
+        // close drop down
+        let event_drop_down = self
+            .client
+            .wait()
+            .for_element(Locator::XPath(r#"//a[@id='js_eventDetailsOpen']"#))
+            .await?;
+        event_drop_down.click().await?;
+
+        Ok(Some(fleet_events))
+    }
+
+    pub async fn fleet_saving(&self, id: &str) -> anyhow::Result<()> {
+        let url = format!("https://s144-tw.ogame.gameforge.com/game/index.php?page=ingame&component=fleetdispatch&cp={}",id);
+        self.client.goto(&url).await?;
+
+        // select all fleets
+        self.client
+            .wait()
+            .for_element(Locator::XPath(r#"//span[@class='send_all']/a"#))
+            .await?
+            .click()
+            .await?;
+
+        // next step
+        self.client
+            .wait()
+            .for_element(Locator::XPath(r#"//a[@id='continueToFleet2']/span"#))
+            .await?
+            .click()
+            .await?;
+
+        sleep(Duration::from_secs(3)).await;
+
+        // enter coords
+        self.client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@class='coords']//input[@id='position']"#,
+            ))
+            .await?
+            .send_keys("16")
+            .await?;
+
+        // select expedition
+        self.client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//ul[@id='missions']//li[@id='button15']/a"#,
+            ))
+            .await?
+            .click()
+            .await?;
+
+        // select 10% speed
+        self.client
+            .wait()
+            .for_element(Locator::XPath(r#"//div[@class='steps']/div[1]"#))
+            .await?
+            .click()
+            .await?;
+
+        // load all resources
+        self.client
+            .wait()
+            .for_element(Locator::XPath(r#"//div[@id='loadAllResources']/a"#))
+            .await?
+            .click()
+            .await?;
+
+        // dispatch fleets
+        self.client
+            .wait()
+            .for_element(Locator::XPath(
+                r#"//div[@id='naviActions']//a[@id='sendFleet']"#,
+            ))
+            .await?
+            .click()
+            .await?;
+
+        Ok(())
+    }
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FleetEvent {
+    pub mission_type: MissionType,
+    pub arrival_time: String,
+    pub coords_origin: String,
+    pub dest_coords: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MissionType {
+    // Dispatch
+    // Self
+    Expedition,
+    Colonization,
+    Harvesting,
+    Transport,
+    Deployment,
+    Espionage,
+    ACSDefend,
+    Attacking,
+    ACSAttack,
+    Destroy,
+    SearchingForLifeforms,
+    // Return
+    ExpeditionReturn,
+    ColonizationReturn,
+    HarvestingReturn,
+    TransportReturn,
+    DeploymentReturn,
+    EspionageReturn,
+    ACSDefendReturn,
+    AttackingReturn,
+    ACSAttackReturn,
+    DestroyReturn,
+    SearchingForLifeformsReturn,
+    // Ally
+    FriendlyTransport,
+    FriendlyACSDefend,
+    // Enemy
+    EnemyEspionage,
+    EnemyAttacking,
+}
+
+impl TryFrom<String> for MissionType {
+    type Error = anyhow::Error;
+
+    fn try_from(str: String) -> Result<Self, Self::Error> {
+        match str.as_str() {
+            // Self Dispatch
+            EXPEDITION => Ok(MissionType::Expedition),
+            COLONIZATION => Ok(MissionType::Colonization),
+            HARVESTING => Ok(MissionType::Harvesting),
+            TRANSPORT => Ok(MissionType::Transport),
+            DEPLOYMENT => Ok(MissionType::Deployment),
+            ESPIONAGE => Ok(MissionType::Espionage),
+            ACS_DEFEND => Ok(MissionType::ACSDefend),
+            ATTACKING => Ok(MissionType::Attacking),
+            ACS_ATTACK => Ok(MissionType::ACSAttack),
+            DESTROY => Ok(MissionType::Destroy),
+            SEARCHING_FOR_LIFEFORMS => Ok(MissionType::SearchingForLifeforms),
+            // Self Return
+            EXPEDITION_RETURN => Ok(MissionType::ExpeditionReturn),
+            COLONIZATION_RETURN => Ok(MissionType::ColonizationReturn),
+            HARVESTING_RETURN => Ok(MissionType::HarvestingReturn),
+            TRANSPORT_RETURN => Ok(MissionType::TransportReturn),
+            DEPLOYMENT_RETURN => Ok(MissionType::DeploymentReturn),
+            ESPIONAGE_RETURN => Ok(MissionType::EspionageReturn),
+            ACS_DEFEND_RETURN => Ok(MissionType::ACSDefendReturn),
+            ATTACKING_RETURN => Ok(MissionType::AttackingReturn),
+            ACS_ATTACK_RETURN => Ok(MissionType::ACSAttackReturn),
+            DESTROY_RETURN => Ok(MissionType::DestroyReturn),
+            SEARCHING_FOR_LIFEFORMS_RETURN => Ok(MissionType::SearchingForLifeformsReturn),
+            // Ally
+            FRIENDLY_TRANSPORT => Ok(MissionType::FriendlyTransport),
+            FRIENDLY_ACS_DEFEND => Ok(MissionType::FriendlyACSDefend),
+            // Enemy
+            ENEMY_ESPIONAGE => Ok(MissionType::EnemyEspionage),
+            ENEMY_ATTACKING => Ok(MissionType::EnemyAttacking),
+
+            _ => Err(anyhow::anyhow!("unknown fleet event")),
+        }
+    }
+}
+
+/// action
+pub const EXPEDITION: &str = "己方艦隊 | 遠征探險";
+pub const EXPEDITION_RETURN: &str = "己方艦隊 | 遠征探險 (返)";
+pub const COLONIZATION: &str = "己方艦隊 | 殖民";
+pub const COLONIZATION_RETURN: &str = "己方艦隊 | 殖民 (返)";
+pub const HARVESTING: &str = "己方艦隊 | 採集回收";
+pub const HARVESTING_RETURN: &str = "己方艦隊 | 採集回收 (返)";
+pub const TRANSPORT: &str = "己方艦隊 | 運輸";
+pub const TRANSPORT_RETURN: &str = "己方艦隊 | 運輸 (返)";
+pub const DEPLOYMENT: &str = "己方艦隊 | 部署";
+pub const DEPLOYMENT_RETURN: &str = "己方艦隊 | 部署 (返)";
+pub const ESPIONAGE: &str = "己方艦隊 | 間諜偵察";
+pub const ESPIONAGE_RETURN: &str = "己方艦隊 | 間諜偵察 (返)";
+pub const ACS_DEFEND: &str = "己方艦隊 | ACS聯合防禦";
+pub const ACS_DEFEND_RETURN: &str = "己方艦隊 | ACS聯合防禦 (返)";
+pub const ATTACKING: &str = "己方艦隊 | 攻擊";
+pub const ATTACKING_RETURN: &str = "己方艦隊 | 攻擊 (返)";
+pub const ACS_ATTACK: &str = "己方艦隊 | ACS聯合攻擊";
+pub const ACS_ATTACK_RETURN: &str = "己方艦隊 | ACS聯合攻擊 (返)";
+pub const DESTROY: &str = "己方艦隊 | 摧毀月球";
+pub const DESTROY_RETURN: &str = "己方艦隊 | 摧毀月球 (返)";
+pub const SEARCHING_FOR_LIFEFORMS: &str = "友方艦隊 | 搜索生命形式";
+pub const SEARCHING_FOR_LIFEFORMS_RETURN: &str = "友方艦隊 | 搜索生命形式 (返)";
+
+pub const FRIENDLY_TRANSPORT: &str = "友方艦隊 | 運輸";
+pub const FRIENDLY_ACS_DEFEND: &str = "友方艦隊 | ACS聯合防禦";
+
+pub const ENEMY_ESPIONAGE: &str = "敵方艦隊 | 間諜偵察";
+pub const ENEMY_ATTACKING: &str = "敵方艦隊 | 攻擊";
+
+// refresh rate
+pub const SECOND: u32 = 1000;
+pub const MINUTE: u32 = SECOND * 60;
+pub const HOUR: u32 = MINUTE * 60;
+pub const REFRESH_RATE: u32 = 15;
